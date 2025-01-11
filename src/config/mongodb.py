@@ -6,6 +6,7 @@ import os
 load_dotenv()
 
 uri = ""
+
 client = pymongo.MongoClient(uri)
 
 try:
