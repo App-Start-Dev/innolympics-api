@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify
 from src.config.mongodb import client
 from bson import ObjectId
 from datetime import datetime
