@@ -5,7 +5,7 @@ import os
 
 load_dotenv()
 
-uri = "mongodb+srv://rafaellouiemiguel:wVdVuNLooABhtvQY@innolympicscluster.tg5iy.mongodb.net/?retryWrites=true&w=majority&appName=innolympicscluster"
+uri = ""
 client = pymongo.MongoClient(uri)
 
 try:

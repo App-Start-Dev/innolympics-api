@@ -1,10 +1,11 @@
 from flask import Blueprint, request, jsonify
-import boto3
+from src.config.mongodb import client
 from bson import ObjectId
 from datetime import datetime
+import boto3
 import os
 from src.middleware.auth_middleware import token_required
-from src.config.mongodb import client
+from werkzeug.utils import secure_filename
 
 knowledge_base_controller = Blueprint("knowledge_base_controller", __name__, url_prefix="/api")
 db = client['alix_db']
@@ -18,6 +19,12 @@ s3_client = boto3.client(
     region_name=os.getenv('AWS_REGION')
 )
 BUCKET_NAME = os.getenv('AWS_BUCKET_NAME')
+
+def ensure_child_folder(child_id):
+    try:
+        s3_client.head_object(Bucket=BUCKET_NAME, Key=f"{child_id}/")
+    except:
+        s3_client.put_object(Bucket=BUCKET_NAME, Key=f"{child_id}/")
 
 @knowledge_base_controller.route("/knowledge-base/<child_id>/upload", methods=["POST"])
 @token_required
@@ -39,17 +46,19 @@ def upload_files(child_id):
         if not files or all(file.filename == '' for file in files):
             return jsonify({"error": "No files selected"}), 400
             
+        # Ensure child's folder exists
+        ensure_child_folder(child_id)
+        
         uploaded_files = []
         for file in files:
             if file.filename != '':
                 # Generate timestamp-based filename
-                timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-                original_extension = os.path.splitext(file.filename)[1]
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                original_extension = os.path.splitext(secure_filename(file.filename))[1]
                 new_filename = f"{timestamp}_{len(uploaded_files)}{original_extension}"
                 
-                # S3 folder path for this child
-                folder_key = f"child_{child_id}/"
-                file_key = folder_key + new_filename
+                # Upload to child's folder
+                file_key = f"{child_id}/{new_filename}"
                 
                 # Upload to S3
                 s3_client.upload_fileobj(
@@ -61,7 +70,8 @@ def upload_files(child_id):
                 
                 uploaded_files.append({
                     "original_name": file.filename,
-                    "stored_name": new_filename
+                    "stored_name": new_filename,
+                    "content_type": file.content_type
                 })
         
         return jsonify({
@@ -89,17 +99,16 @@ def list_files(child_id):
             return jsonify({"error": "Child not found or access denied"}), 404
             
         # List objects in child's folder
-        folder_key = f"child_{child_id}/"
         response = s3_client.list_objects_v2(
             Bucket=BUCKET_NAME,
-            Prefix=folder_key
+            Prefix=f"{child_id}/"
         )
         
         files = []
         if 'Contents' in response:
             for obj in response['Contents']:
                 # Skip the folder itself
-                if obj['Key'] != folder_key:
+                if not obj['Key'].endswith('/'):
                     # Generate presigned URL for each file
                     url = s3_client.generate_presigned_url(
                         'get_object',
@@ -136,7 +145,7 @@ def delete_file(child_id, filename):
             return jsonify({"error": "Child not found or access denied"}), 404
             
         # Delete file from S3
-        file_key = f"child_{child_id}/{filename}"
+        file_key = f"{child_id}/{filename}"
         s3_client.delete_object(
             Bucket=BUCKET_NAME,
             Key=file_key
