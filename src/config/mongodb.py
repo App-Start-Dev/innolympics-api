@@ -4,8 +4,10 @@ import pymongo
 import os
 
 load_dotenv()
+mongodb_user = os.getenv("MONGODB_USER")
+mongodb_password = os.getenv("MONGODB_PASSWORD")
 
-uri = ""
+uri = f"mongodb+srv://{mongodb_user}:{mongodb_password}@innolympicscluster.tg5iy.mongodb.net/?retryWrites=true&w=majority&appName=innolympicscluster"
 
 client = pymongo.MongoClient(uri)
 

@@ -41,12 +41,6 @@ def upload_file_to_s3(file, child_id, index):
         original_extension = os.path.splitext(secure_filename(file.filename))[1]
         new_filename = f"{timestamp}_{index}{original_extension}"
         
-        # Create folder if it doesn't exist
-        try:
-            s3_client.head_object(Bucket=BUCKET_NAME, Key=f"{child_id}/")
-        except:
-            s3_client.put_object(Bucket=BUCKET_NAME, Key=f"{child_id}/")
-        
         # Upload to child's folder
         file_key = f"{child_id}/{new_filename}"
         
@@ -102,6 +96,8 @@ def create_child():
         # Create support group document
         support_group = {
             "code": support_code,
+            "name": f"{data['name']}'s Support Group",  # Add group name
+            "child_id": None,  # Will be set after child creation
             "members": [{
                 "uid": parent_uid,
                 "name": parent_name,
@@ -113,6 +109,7 @@ def create_child():
         }
         
         support_group_result = support_group_collection.insert_one(support_group)
+        support_group_id = str(support_group_result.inserted_id)
         
         # Create child document
         child = {
@@ -121,14 +118,33 @@ def create_child():
             "sex": data['sex'],
             "asd_type": data['asd_type'],
             "parent_uid": parent_uid,
-            "support_group_id": str(support_group_result.inserted_id),
+            "support_group_id": support_group_id,
             "support_code": support_code,
             "created_at": datetime.now(),
             "updated_at": datetime.now()
         }
         
+        # Log the support group ID for debugging
+        logging.info(f"Creating child with support_group_id: {child['support_group_id']}")
+        
         result = child_collection.insert_one(child)
         child_id = str(result.inserted_id)
+        
+        # Update support group with child ID
+        support_group_collection.update_one(
+            {"_id": support_group_result.inserted_id},
+            {"$set": {"child_id": child_id}}
+        )
+
+        # Create S3 folder for the child
+        try:
+            s3_client.put_object(Bucket=BUCKET_NAME, Key=f"{child_id}/")
+            logging.info(f"Created S3 folder for child {child_id}")
+        except Exception as e:
+            logging.error(f"Failed to create S3 folder for child {child_id}: {str(e)}")
+            # Delete the child document since folder creation failed
+            child_collection.delete_one({"_id": result.inserted_id})
+            return jsonify({"error": f"Failed to create storage for child: {str(e)}"}), 500
         
         # Handle file uploads
         uploaded_files = []
@@ -198,14 +214,61 @@ def get_all_children():
     try:
         # Get parent_uid from the authenticated user
         parent_uid = request.user['uid']
-        
-        # Query children for this parent only
+        logging.info(f"Getting children for user: {parent_uid}")
+
         children = []
-        for child in child_collection.find({"parent_uid": parent_uid}):
+        
+        # First get parent's own children
+        parent_children = child_collection.find({"parent_uid": parent_uid})
+        for child in parent_children:
             child['_id'] = str(child['_id'])
+            child['is_support_child'] = False
             children.append(child)
+            logging.info(f"Found parent's child: {child.get('name')}")
+
+        # Get all support groups where this user is a member
+        support_groups = list(support_group_collection.find({"members.uid": parent_uid}))
+        logging.info(f"Found {len(support_groups)} support groups for user")
+        
+        for group in support_groups:
+            group_id = str(group["_id"])
+            logging.info(f"Processing support group: {group_id}")
+            
+            # Find children that belong to this support group
+            support_children = child_collection.find({
+                "support_group_id": group_id,
+                "parent_uid": {"$ne": parent_uid}  # Exclude own children
+            })
+            
+            for child in support_children:
+                logging.info(f"Found support group child: {child.get('name')} in group {group_id}")
+                child_dict = {
+                    **child,
+                    '_id': str(child['_id']),
+                    'is_support_child': True,
+                    'support_group_name': group.get('name', 'Support Group'),
+                    'support_group_role': next(
+                        (m['role'] for m in group['members'] if m['uid'] == parent_uid),
+                        'member'
+                    )
+                }
+                children.append(child_dict)
+
+        # Log all found children
+        for child in children:
+            logging.info(
+                f"Final child entry: {child.get('name')} - "
+                f"Support Group ID: {child.get('support_group_id')} - "
+                f"Is Support Child: {child.get('is_support_child')} - "
+                f"Parent UID: {child.get('parent_uid')}"
+            )
+        
+        logging.info(f"Total children found: {len(children)}")
         return jsonify(children), 200
+        
     except Exception as e:
+        logging.error(f"Error in get_all_children: {str(e)}")
+        logging.exception("Full traceback:")
         return jsonify({"error": str(e)}), 500
 
 @child_controller.route("/child/<id>", methods=["GET"])

@@ -4,6 +4,8 @@ from bson import ObjectId
 from datetime import datetime
 import boto3
 import os
+import logging
+from botocore.exceptions import ClientError
 from src.middleware.auth_middleware import token_required
 from werkzeug.utils import secure_filename
 
@@ -20,16 +22,39 @@ s3_client = boto3.client(
 )
 BUCKET_NAME = os.getenv('AWS_BUCKET_NAME')
 
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'pdf', 'doc', 'docx', 'txt'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 def ensure_child_folder(child_id):
     try:
+        # Try to check if folder exists
         s3_client.head_object(Bucket=BUCKET_NAME, Key=f"{child_id}/")
-    except:
-        s3_client.put_object(Bucket=BUCKET_NAME, Key=f"{child_id}/")
+        logging.info(f"Folder {child_id}/ already exists in bucket {BUCKET_NAME}")
+    except ClientError as e:
+        error_code = int(e.response['Error']['Code'])
+        if error_code == 404:  # If folder doesn't exist
+            try:
+                # Create the folder
+                s3_client.put_object(Bucket=BUCKET_NAME, Key=f"{child_id}/")
+                logging.info(f"Created folder {child_id}/ in bucket {BUCKET_NAME}")
+            except Exception as create_error:
+                logging.error(f"Failed to create folder {child_id}/: {str(create_error)}")
+                raise create_error
+        else:
+            logging.error(f"Error checking folder {child_id}/: {str(e)}")
+            raise e
+    except Exception as e:
+        logging.error(f"Unexpected error with folder {child_id}/: {str(e)}")
+        raise e
 
 @knowledge_base_controller.route("/knowledge-base/<child_id>/upload", methods=["POST"])
 @token_required
 def upload_files(child_id):
     try:
+        logging.info(f"Upload request received for child {child_id}")
+        
         # Verify child access
         child = child_collection.find_one({
             "_id": ObjectId(child_id),
@@ -37,21 +62,37 @@ def upload_files(child_id):
         })
         
         if not child:
+            logging.warning(f"Access denied for child {child_id} by user {request.user['uid']}")
             return jsonify({"error": "Child not found or access denied"}), 404
             
         if 'files' not in request.files:
+            logging.warning("No files in request")
             return jsonify({"error": "No files provided"}), 400
             
         files = request.files.getlist('files')
         if not files or all(file.filename == '' for file in files):
+            logging.warning("No valid files selected")
             return jsonify({"error": "No files selected"}), 400
             
         # Ensure child's folder exists
         ensure_child_folder(child_id)
         
         uploaded_files = []
+        failed_files = []
+        
         for file in files:
-            if file.filename != '':
+            if file.filename == '':
+                continue
+                
+            if not allowed_file(file.filename):
+                failed_files.append({
+                    "filename": file.filename,
+                    "error": "File type not allowed"
+                })
+                logging.warning(f"Skipping file {file.filename}: File type not allowed")
+                continue
+                
+            try:
                 # Generate timestamp-based filename
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 original_extension = os.path.splitext(secure_filename(file.filename))[1]
@@ -68,19 +109,36 @@ def upload_files(child_id):
                     ExtraArgs={'ContentType': file.content_type}
                 )
                 
+                logging.info(f"Successfully uploaded file {file.filename} as {file_key}")
+                
                 uploaded_files.append({
                     "original_name": file.filename,
                     "stored_name": new_filename,
                     "content_type": file.content_type
                 })
+            except Exception as e:
+                error_msg = f"Failed to upload {file.filename}: {str(e)}"
+                logging.error(error_msg)
+                failed_files.append({
+                    "filename": file.filename,
+                    "error": str(e)
+                })
         
-        return jsonify({
+        response = {
             "message": f"Successfully uploaded {len(uploaded_files)} files",
             "files": uploaded_files
-        }), 200
+        }
+        
+        if failed_files:
+            response["failed_files"] = failed_files
+            response["warning"] = f"{len(failed_files)} files failed to upload"
+            
+        return jsonify(response), 200 if uploaded_files else 400
         
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        error_msg = f"Error processing upload request: {str(e)}"
+        logging.error(error_msg)
+        return jsonify({"error": error_msg}), 500
 
 @knowledge_base_controller.route("/knowledge-base/<child_id>/files", methods=["GET"])
 @token_required
